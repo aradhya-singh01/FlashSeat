@@ -1,0 +1,1347 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FlashSeat | High-Concurrency Ticketing Engine</title>
+  <meta name="description" content="High-performance flash ticketing and seat reservation engine with distributed Redis locks, optimistic concurrency, and real-time seat matrices.">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              400: '#818cf8',
+              500: '#6366f1',
+              600: '#4f46e5',
+              900: '#1e1b4b',
+            },
+            seat: {
+              avail: '#10b981',    // Emerald
+              held: '#f59e0b',     // Amber
+              booked: '#ef4444',   // Rose/Red
+              selected: '#8b5cf6', // Violet
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            display: ['Outfit', 'Inter', 'sans-serif'],
+          },
+          animation: {
+            'pulse-fast': 'pulse 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            'glow': 'glow 2s ease-in-out infinite alternate',
+          },
+          keyframes: {
+            glow: {
+              '0%': { boxShadow: '0 0 10px rgba(99, 102, 241, 0.4)' },
+              '100%': { boxShadow: '0 0 25px rgba(99, 102, 241, 0.8)' },
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts: Inter & Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;600;700;800;900&display=swap" rel="stylesheet">
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- Canvas Confetti -->
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
+
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #070a12;
+    }
+    h1, h2, h3, h4, .font-display {
+      font-family: 'Outfit', sans-serif;
+    }
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+    .stage-glow {
+      background: radial-gradient(ellipse at center top, rgba(99, 102, 241, 0.25) 0%, rgba(99, 102, 241, 0.05) 50%, transparent 80%);
+    }
+    .ticket-rip {
+      background: radial-gradient(circle at left, transparent 10px, #1e293b 11px),
+                  radial-gradient(circle at right, transparent 10px, #1e293b 11px);
+      background-size: 51% 100%;
+      background-position: left, right;
+      background-repeat: no-repeat;
+    }
+  </style>
+</head>
+<body class="min-h-screen text-slate-100 antialiased flex flex-col selection:bg-brand-500 selection:text-white">
+
+  <!-- Top Announcement Bar / Engine Status -->
+  <header class="sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      
+      <!-- Logo & Branding -->
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 via-rose-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 ring-1 ring-white/20">
+          <i data-lucide="zap" class="w-5 h-5 text-white fill-white"></i>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="text-xl font-black tracking-tight font-display bg-gradient-to-r from-amber-400 via-rose-400 to-indigo-300 bg-clip-text text-transparent">
+              FlashSeat
+            </span>
+            <span class="px-2 py-0.5 text-[10px] uppercase font-bold tracking-wider rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+              Live Engine
+            </span>
+          </div>
+          <p class="text-[11px] text-slate-400 tracking-wide font-medium">Distributed High-Concurrency Ticketing</p>
+        </div>
+      </div>
+
+      <!-- Center System Status Pill -->
+      <div class="hidden md:flex items-center gap-3 px-3 py-1.5 rounded-full bg-slate-900/90 border border-slate-800 text-xs text-slate-300 shadow-inner">
+        <div class="flex items-center gap-1.5">
+          <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+          <span id="engineStatusText">Backend Online</span>
+        </div>
+        <span class="text-slate-700">|</span>
+        <div class="flex items-center gap-1.5 text-indigo-400">
+          <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
+          <span id="redisStatusText">Redis Distributed TTL Locks</span>
+        </div>
+      </div>
+
+      <!-- Right Header Actions (User Switcher, Simulator, Reset) -->
+      <div class="flex items-center gap-2 sm:gap-3">
+        
+        <!-- Active User Badge / Switcher -->
+        <div class="relative">
+          <button id="userMenuBtn" class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs font-medium transition text-slate-200">
+            <div class="w-2 h-2 rounded-full bg-indigo-400"></div>
+            <span>User: <strong id="currentUserNameDisplay" class="text-indigo-300">Buyer_Alpha</strong></span>
+            <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-400"></i>
+          </button>
+          
+          <!-- Dropdown -->
+          <div id="userDropdown" class="hidden absolute right-0 mt-2 w-64 rounded-xl bg-slate-900 border border-slate-800 shadow-2xl p-2 z-50 text-xs">
+            <p class="px-2 py-1 text-slate-400 text-[11px] font-semibold uppercase tracking-wider">Switch Simulated Buyer</p>
+            <button onclick="switchUser('Buyer_Alpha')" class="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-200">
+              <span>👤 Buyer_Alpha (Primary)</span>
+              <span class="text-[10px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">Active</span>
+            </button>
+            <button onclick="switchUser('Buyer_Beta')" class="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-300">
+              <span>👤 Buyer_Beta (Competitor)</span>
+              <span class="text-[10px] text-slate-500">Test Race</span>
+            </button>
+            <button onclick="switchUser('Bot_Scalper_99')" class="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-800 flex items-center justify-between text-slate-300">
+              <span>🤖 Bot_Scalper_99</span>
+              <span class="text-[10px] text-amber-500">Test Scalping</span>
+            </button>
+            <div class="border-t border-slate-800 my-1"></div>
+            <button onclick="randomizeUser()" class="w-full text-left px-3 py-2 rounded-lg hover:bg-indigo-950/40 text-indigo-400 flex items-center gap-1.5">
+              <i data-lucide="shuffle" class="w-3 h-3"></i> Generate Random Session
+            </button>
+          </div>
+        </div>
+
+        <!-- Concurrency Stress Test Button -->
+        <button onclick="openRaceSimulator()" class="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-semibold transition" title="Trigger high-concurrency race condition test">
+          <i data-lucide="flame" class="w-3.5 h-3.5 fill-rose-500/30"></i>
+          <span>Race Simulator</span>
+        </button>
+
+        <!-- Lookup Ticket Button -->
+        <button onclick="openVerifyModal()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 transition">
+          <i data-lucide="ticket" class="w-3.5 h-3.5 text-indigo-400"></i>
+          <span class="hidden sm:inline">Verify Pass</span>
+        </button>
+
+        <!-- Reset Demo Button -->
+        <button onclick="resetDemoSeats()" id="resetBtn" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-400 hover:text-amber-400 transition" title="Reset all seats to Available">
+          <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
+          <span class="hidden md:inline">Reset</span>
+        </button>
+
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Layout -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+
+    <!-- Event Selector Cards (Tabs) -->
+    <div>
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold tracking-wider uppercase text-slate-400 flex items-center gap-2 font-display">
+          <i data-lucide="sparkles" class="w-4 h-4 text-amber-400"></i>
+          Active Flash Ticketing Events
+        </h2>
+        <span class="text-xs text-slate-500">Auto-refreshing live matrix every 2.5s</span>
+      </div>
+
+      <div id="eventsContainer" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <!-- Event cards will be dynamically rendered here -->
+        <div class="animate-pulse bg-slate-900/50 border border-slate-800 rounded-2xl p-4 h-28"></div>
+        <div class="animate-pulse bg-slate-900/50 border border-slate-800 rounded-2xl p-4 h-28"></div>
+        <div class="animate-pulse bg-slate-900/50 border border-slate-800 rounded-2xl p-4 h-28"></div>
+      </div>
+    </div>
+
+    <!-- Active Event Banner & Real-time Live Counters -->
+    <div id="activeEventBanner" class="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-slate-800 p-5 shadow-xl">
+      <div class="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wider bg-rose-500/20 text-rose-300 border border-rose-500/30">
+              ⚡ Flash Sale Active
+            </span>
+            <span id="activeEventVenue" class="text-xs text-slate-400 flex items-center gap-1">
+              <i data-lucide="map-pin" class="w-3.5 h-3.5 text-slate-500"></i>
+              SoFi Stadium, Los Angeles, CA
+            </span>
+          </div>
+          <h1 id="activeEventTitle" class="text-xl sm:text-2xl font-black font-display text-white tracking-tight">
+            Taylor Swift | The Eras Tour (Encore Flash Sale)
+          </h1>
+          <p id="activeEventDesc" class="text-xs text-slate-400 mt-0.5 max-w-2xl line-clamp-1">
+            High-speed real-time ticket checkout with atomic Redis distributed locks.
+          </p>
+        </div>
+
+        <!-- Real-Time Metrics Badges -->
+        <div class="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <div class="px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-800/80 text-center min-w-[75px]">
+            <p class="text-[10px] uppercase font-bold text-slate-400">Total</p>
+            <p id="statTotalSeats" class="text-lg font-black text-white font-display">76</p>
+          </div>
+          <div class="px-3 py-2 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-center min-w-[85px]">
+            <p class="text-[10px] uppercase font-bold text-emerald-400">Available</p>
+            <p id="statAvailSeats" class="text-lg font-black text-emerald-400 font-display">74</p>
+          </div>
+          <div class="px-3 py-2 rounded-xl bg-amber-950/40 border border-amber-500/30 text-center min-w-[75px]">
+            <p class="text-[10px] uppercase font-bold text-amber-400">Held (TTL)</p>
+            <p id="statHeldSeats" class="text-lg font-black text-amber-400 font-display">0</p>
+          </div>
+          <div class="px-3 py-2 rounded-xl bg-rose-950/40 border border-rose-500/30 text-center min-w-[75px]">
+            <p class="text-[10px] uppercase font-bold text-rose-400">Booked</p>
+            <p id="statBookedSeats" class="text-lg font-black text-rose-400 font-display">2</p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Main Seat Matrix & Checkout Drawer Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      
+      <!-- Left / Center: Interactive Seat Map (8 Columns) -->
+      <section class="lg:col-span-8 bg-slate-900/60 backdrop-blur-xl border border-slate-800 rounded-3xl p-5 sm:p-7 shadow-2xl relative">
+        
+        <!-- Stage Visual Area -->
+        <div class="mb-8 text-center relative">
+          <!-- Ambient Glow Curve -->
+          <div class="w-3/4 mx-auto h-12 stage-glow rounded-b-full"></div>
+          
+          <!-- Stage Bar -->
+          <div class="w-2/3 mx-auto py-2.5 rounded-2xl bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-indigo-500/30 shadow-lg shadow-indigo-500/10 flex items-center justify-center gap-2">
+            <i data-lucide="music" class="w-4 h-4 text-indigo-400"></i>
+            <span class="text-xs font-bold uppercase tracking-widest text-indigo-200 font-display">
+              Stage / Arena Floor Front
+            </span>
+            <i data-lucide="volume-2" class="w-4 h-4 text-indigo-400"></i>
+          </div>
+        </div>
+
+        <!-- Seat Color Legend & Filter -->
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-6 p-3 rounded-2xl bg-slate-950/60 border border-slate-800/80 text-xs">
+          <div class="flex items-center gap-4 flex-wrap">
+            <div class="flex items-center gap-1.5">
+              <span class="w-3.5 h-3.5 rounded-md bg-emerald-500 shadow-sm shadow-emerald-500/40"></span>
+              <span class="text-slate-300 font-medium">Available</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="w-3.5 h-3.5 rounded-md bg-amber-400 shadow-sm shadow-amber-400/40 animate-pulse"></span>
+              <span class="text-slate-300 font-medium">Held (10m TTL)</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="w-3.5 h-3.5 rounded-md bg-rose-600/80 border border-rose-500/30"></span>
+              <span class="text-slate-400 font-medium">Booked / Sold</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="w-3.5 h-3.5 rounded-md bg-violet-600 ring-2 ring-violet-400"></span>
+              <span class="text-violet-300 font-medium">Selected (You)</span>
+            </div>
+          </div>
+
+          <div class="text-[11px] text-slate-400 flex items-center gap-1">
+            <i data-lucide="mouse-pointer" class="w-3 h-3 text-slate-500"></i>
+            <span>Click available seat to hold</span>
+          </div>
+        </div>
+
+        <!-- Seats Container (Rendered by JS) -->
+        <div id="seatsContainer" class="space-y-4">
+          <!-- Dynamic row-based seats grid -->
+          <div class="text-center py-16 text-slate-500 text-sm">
+            <i data-lucide="loader" class="w-6 h-6 mx-auto mb-2 animate-spin text-indigo-400"></i>
+            Loading live seat matrix...
+          </div>
+        </div>
+
+        <!-- Pricing Tier Badges Breakdown -->
+        <div id="tierLegendContainer" class="mt-8 pt-5 border-t border-slate-800/80 flex flex-wrap items-center justify-center gap-3 text-xs text-slate-400">
+          <!-- Tier info rendered dynamically -->
+        </div>
+
+      </section>
+
+      <!-- Right: Hold & Checkout Station (4 Columns) -->
+      <aside class="lg:col-span-4 sticky top-24 space-y-4">
+        
+        <!-- Dynamic Checkout Panel -->
+        <div id="checkoutCard" class="bg-slate-900/80 backdrop-blur-xl border border-slate-800 rounded-3xl p-6 shadow-2xl relative overflow-hidden">
+          
+          <!-- State 1: No Seat Selected (Default) -->
+          <div id="stateNoSelection" class="text-center py-10 space-y-4">
+            <div class="w-16 h-16 mx-auto rounded-2xl bg-slate-800/80 border border-slate-700/60 flex items-center justify-center text-slate-400 shadow-inner">
+              <i data-lucide="armchair" class="w-8 h-8 text-indigo-400"></i>
+            </div>
+            <div>
+              <h3 class="text-base font-bold text-white font-display">No Seat Selected</h3>
+              <p class="text-xs text-slate-400 mt-1 max-w-xs mx-auto">
+                Click any available <strong class="text-emerald-400">green seat</strong> on the map to trigger an atomic 10-minute hold.
+              </p>
+            </div>
+
+            <!-- Concurrency Engine Highlights -->
+            <div class="pt-4 space-y-2.5 text-left border-t border-slate-800/80">
+              <div class="flex items-start gap-2.5 text-xs text-slate-300">
+                <i data-lucide="lock" class="w-4 h-4 text-amber-400 mt-0.5 shrink-0"></i>
+                <div>
+                  <strong class="text-slate-200">10-Minute TTL Lock:</strong>
+                  <p class="text-[11px] text-slate-400">Distributed lock guarantees zero double-booking during checkout.</p>
+                </div>
+              </div>
+              <div class="flex items-start gap-2.5 text-xs text-slate-300">
+                <i data-lucide="zap" class="w-4 h-4 text-indigo-400 mt-0.5 shrink-0"></i>
+                <div>
+                  <strong class="text-slate-200">Optimistic ACID Writes:</strong>
+                  <p class="text-[11px] text-slate-400">SQLAlchemy versioning counters prevent stale checkout race conditions.</p>
+                </div>
+              </div>
+              <div class="flex items-start gap-2.5 text-xs text-slate-300">
+                <i data-lucide="shield" class="w-4 h-4 text-emerald-400 mt-0.5 shrink-0"></i>
+                <div>
+                  <strong class="text-slate-200">Anti-Scalping Guard:</strong>
+                  <p class="text-[11px] text-slate-400">Automatic rate limiting stops automated checkout bots.</p>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- State 2: Active Seat Hold & Checkout (Hidden Initially) -->
+          <div id="stateHeldCheckout" class="hidden space-y-5">
+            
+            <!-- Hold Status Banner & Countdown Timer -->
+            <div class="rounded-2xl bg-gradient-to-br from-amber-500/10 via-slate-900 to-amber-500/5 border border-amber-500/30 p-4">
+              <div class="flex items-center justify-between">
+                <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-400/20 text-amber-300 border border-amber-400/30 flex items-center gap-1">
+                  <i data-lucide="clock" class="w-3 h-3"></i>
+                  Seat Held in Redis
+                </span>
+                <span id="lockKeyBadge" class="text-[10px] text-slate-500 font-mono">key: hold:...</span>
+              </div>
+
+              <!-- Countdown Timer -->
+              <div class="mt-3 text-center">
+                <p class="text-[11px] text-slate-400 uppercase font-semibold">Hold Expires In</p>
+                <div id="countdownTimer" class="text-3xl font-black font-display text-amber-400 tracking-wider my-0.5">
+                  10:00
+                </div>
+                <!-- Progress bar -->
+                <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mt-1.5">
+                  <div id="countdownProgress" class="bg-amber-400 h-1.5 rounded-full transition-all duration-1000" style="width: 100%"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Selected Seat Details -->
+            <div class="p-4 rounded-2xl bg-slate-950/60 border border-slate-800 space-y-3">
+              <div class="flex items-center justify-between">
+                <div>
+                  <p class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Selected Seat</p>
+                  <p id="heldSeatNumber" class="text-2xl font-black font-display text-white">A04</p>
+                </div>
+                <div class="text-right">
+                  <span id="heldSeatTier" class="px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
+                    VIP Diamond Floor
+                  </span>
+                  <p id="heldSeatRow" class="text-xs text-slate-400 mt-1">Row A &bull; Floor Section</p>
+                </div>
+              </div>
+
+              <div class="border-t border-slate-800/80 pt-2 space-y-1.5 text-xs">
+                <div class="flex justify-between text-slate-400">
+                  <span>Ticket Base Price</span>
+                  <span id="heldSeatBasePrice" class="text-white font-medium">$499.00</span>
+                </div>
+                <div class="flex justify-between text-slate-400">
+                  <span>Flash Sale Fee</span>
+                  <span class="text-emerald-400 font-medium">$0.00 (Waived)</span>
+                </div>
+                <div class="flex justify-between text-sm font-bold text-white pt-1 border-t border-slate-800">
+                  <span>Total Amount Due</span>
+                  <span id="heldSeatTotalPrice" class="text-emerald-400 text-base font-display">$499.00</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Customer Checkout Info Form -->
+            <div class="space-y-3 text-xs">
+              <div>
+                <label class="block text-slate-400 font-medium mb-1">Purchaser User ID</label>
+                <input type="text" id="checkoutUserIdInput" readonly class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-indigo-300 font-mono focus:outline-none">
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-slate-400 font-medium mb-1">Customer Name</label>
+                  <input type="text" id="customerNameInput" value="Alex Chen" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-indigo-500 transition">
+                </div>
+                <div>
+                  <label class="block text-slate-400 font-medium mb-1">Payment Method</label>
+                  <div class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-300 flex items-center gap-1.5">
+                    <i data-lucide="credit-card" class="w-3.5 h-3.5 text-emerald-400"></i>
+                    <span>1-Click FlashPay</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="space-y-2 pt-1">
+              <button onclick="confirmSeatBooking()" id="confirmBookingBtn" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 via-teal-500 to-indigo-600 hover:from-emerald-400 hover:to-indigo-500 text-white font-bold text-sm tracking-wide shadow-lg shadow-emerald-500/25 flex items-center justify-center gap-2 transition transform active:scale-95">
+                <i data-lucide="check-circle" class="w-4 h-4"></i>
+                <span>Confirm Purchase & Issue Ticket</span>
+              </button>
+              
+              <button onclick="releaseSeatHold()" id="releaseHoldBtn" class="w-full py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-rose-400 text-xs font-semibold flex items-center justify-center gap-1.5 transition">
+                <i data-lucide="x-circle" class="w-3.5 h-3.5"></i>
+                <span>Abandon Hold / Release Seat</span>
+              </button>
+            </div>
+
+          </div>
+
+          <!-- State 3: Confirmed Ticket Pass (Generated Pass) -->
+          <div id="stateConfirmedPass" class="hidden space-y-4">
+            
+            <div class="text-center">
+              <div class="w-12 h-12 mx-auto rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center shadow-lg shadow-emerald-500/20 mb-2">
+                <i data-lucide="check" class="w-6 h-6 stroke-[3]"></i>
+              </div>
+              <h3 class="text-lg font-black font-display text-white">Purchase Confirmed!</h3>
+              <p class="text-xs text-slate-400">Your digital pass is verified & ready.</p>
+            </div>
+
+            <!-- Visual Digital Boarding Pass Ticket -->
+            <div class="rounded-2xl bg-gradient-to-b from-slate-800 to-slate-900 border border-amber-500/30 overflow-hidden shadow-2xl relative">
+              <!-- Top Gold Header -->
+              <div class="bg-gradient-to-r from-amber-500 via-rose-500 to-indigo-600 p-3 text-white flex items-center justify-between">
+                <div class="flex items-center gap-1.5">
+                  <i data-lucide="zap" class="w-4 h-4 fill-white"></i>
+                  <span class="text-xs font-black tracking-wider uppercase font-display">FlashSeat Pass</span>
+                </div>
+                <span class="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-black/30 backdrop-blur-sm border border-white/20">
+                  Confirmed
+                </span>
+              </div>
+
+              <!-- Ticket Body -->
+              <div class="p-4 space-y-3">
+                <div>
+                  <p id="ticketEventName" class="text-sm font-bold text-white font-display line-clamp-1">Taylor Swift | The Eras Tour</p>
+                  <p id="ticketVenue" class="text-[11px] text-slate-400">SoFi Stadium, Los Angeles</p>
+                </div>
+
+                <div class="grid grid-cols-3 gap-2 py-2 px-3 rounded-xl bg-slate-950/80 border border-slate-800 text-center">
+                  <div>
+                    <p class="text-[9px] uppercase font-bold text-slate-500">Seat</p>
+                    <p id="ticketSeatNumber" class="text-base font-black text-amber-400 font-display">A04</p>
+                  </div>
+                  <div>
+                    <p class="text-[9px] uppercase font-bold text-slate-500">Row</p>
+                    <p id="ticketRow" class="text-base font-black text-white font-display">A</p>
+                  </div>
+                  <div>
+                    <p class="text-[9px] uppercase font-bold text-slate-500">Paid</p>
+                    <p id="ticketPrice" class="text-base font-black text-emerald-400 font-display">$499</p>
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-between text-xs pt-1">
+                  <div>
+                    <p class="text-[9px] uppercase text-slate-500 font-bold">Booking Reference</p>
+                    <p id="ticketBookingRef" class="text-xs font-mono font-bold text-indigo-300">FS-A04-XXXX</p>
+                  </div>
+                  <button onclick="copyBookingRef()" class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition" title="Copy Reference">
+                    <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+                  </button>
+                </div>
+
+                <!-- Barcode SVG Simulation -->
+                <div class="pt-2 text-center border-t border-slate-800">
+                  <div class="h-9 flex items-center justify-center gap-1 opacity-80 overflow-hidden">
+                    <span class="w-1 h-full bg-white"></span>
+                    <span class="w-0.5 h-full bg-white"></span>
+                    <span class="w-2 h-full bg-white"></span>
+                    <span class="w-0.5 h-full bg-white"></span>
+                    <span class="w-1.5 h-full bg-white"></span>
+                    <span class="w-1 h-full bg-white"></span>
+                    <span class="w-0.5 h-full bg-white"></span>
+                    <span class="w-2 h-full bg-white"></span>
+                    <span class="w-1 h-full bg-white"></span>
+                    <span class="w-0.5 h-full bg-white"></span>
+                    <span class="w-1.5 h-full bg-white"></span>
+                    <span class="w-2 h-full bg-white"></span>
+                    <span class="w-0.5 h-full bg-white"></span>
+                  </div>
+                  <p class="text-[9px] font-mono text-slate-500 mt-1">SCAN AT ARENA ENTRANCE</p>
+                </div>
+
+              </div>
+            </div>
+
+            <!-- Button: Reset to book another -->
+            <button onclick="clearCurrentSelection()" class="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition flex items-center justify-center gap-1.5">
+              <i data-lucide="plus-circle" class="w-3.5 h-3.5"></i>
+              <span>Book Another Seat</span>
+            </button>
+
+          </div>
+
+        </div>
+
+      </aside>
+
+    </div>
+
+  </main>
+
+  <!-- Modal 1: Concurrency Race Condition Simulator -->
+  <div id="raceModal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-6 space-y-4 shadow-2xl relative">
+      <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+        <div class="flex items-center gap-2">
+          <div class="p-2 rounded-xl bg-rose-500/20 text-rose-400">
+            <i data-lucide="flame" class="w-5 h-5"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold font-display text-white">Concurrency Stress Simulator</h3>
+            <p class="text-xs text-slate-400">Simulate race condition on a single seat</p>
+          </div>
+        </div>
+        <button onclick="closeRaceSimulator()" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <p class="text-slate-300">
+          This test fires <strong>multiple simultaneous asynchronous requests</strong> with different user session IDs targeting the exact same seat at the exact same millisecond.
+        </p>
+
+        <div>
+          <label class="block text-slate-400 font-medium mb-1">Target Seat ID (from active event)</label>
+          <input type="number" id="raceSeatIdInput" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono" value="1">
+        </div>
+
+        <div>
+          <label class="block text-slate-400 font-medium mb-1">Concurrent Competitor Bots</label>
+          <select id="raceBotCountSelect" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white">
+            <option value="5">5 Simultaneous Requests</option>
+            <option value="10" selected>10 Simultaneous Requests</option>
+            <option value="20">20 Simultaneous Requests</option>
+          </select>
+        </div>
+
+        <button onclick="executeRaceConditionTest()" id="executeRaceBtn" class="w-full py-2.5 rounded-xl bg-gradient-to-r from-rose-500 to-amber-500 hover:from-rose-400 hover:to-amber-400 text-white font-bold text-xs tracking-wide shadow-lg shadow-rose-500/20 flex items-center justify-center gap-2">
+          <i data-lucide="play" class="w-3.5 h-3.5 fill-white"></i>
+          <span>Launch Race Attack!</span>
+        </button>
+
+        <!-- Race Results Terminal Area -->
+        <div id="raceResultsArea" class="hidden space-y-2 mt-4 pt-3 border-t border-slate-800">
+          <p class="font-bold text-slate-300 flex items-center justify-between">
+            <span>Race Execution Results:</span>
+            <span id="raceWinnerBadge" class="text-emerald-400 font-mono text-[11px]"></span>
+          </p>
+          <div id="raceLogsContainer" class="max-h-48 overflow-y-auto p-3 rounded-xl bg-slate-950 font-mono text-[11px] space-y-1 border border-slate-800/80">
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 2: Verify Booking Reference -->
+  <div id="verifyModal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl relative">
+      <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+        <div class="flex items-center gap-2">
+          <div class="p-2 rounded-xl bg-indigo-500/20 text-indigo-400">
+            <i data-lucide="search" class="w-5 h-5"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold font-display text-white">Verify Booking Reference</h3>
+            <p class="text-xs text-slate-400">Query confirmed ACID database records</p>
+          </div>
+        </div>
+        <button onclick="closeVerifyModal()" class="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-400 font-medium mb-1">Enter Booking Reference</label>
+          <div class="flex gap-2">
+            <input type="text" id="verifyRefInput" placeholder="e.g. FS-1A01-DEMO" class="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono uppercase focus:outline-none focus:border-indigo-500">
+            <button onclick="queryBookingReference()" class="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold transition">
+              Verify
+            </button>
+          </div>
+        </div>
+
+        <!-- Verification Result Details -->
+        <div id="verifyResultContainer" class="hidden p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+          <div class="flex items-center justify-between">
+            <span class="text-emerald-400 font-bold flex items-center gap-1">
+              <i data-lucide="check-circle" class="w-3.5 h-3.5"></i> Legitimate Ticket
+            </span>
+            <span id="verifiedStatusBadge" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400">CONFIRMED</span>
+          </div>
+          <div class="text-slate-300 space-y-1 text-[11px] pt-1">
+            <p><strong>Event:</strong> <span id="verifiedEventName">-</span></p>
+            <p><strong>Venue:</strong> <span id="verifiedVenue">-</span></p>
+            <p><strong>Seat:</strong> <span id="verifiedSeat" class="text-amber-400 font-bold">-</span> (<span id="verifiedTier">-</span>)</p>
+            <p><strong>Paid:</strong> <span id="verifiedAmount" class="text-emerald-400 font-bold">-</span></p>
+            <p><strong>User:</strong> <span id="verifiedUser" class="font-mono text-indigo-300">-</span></p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- Application Logic JavaScript -->
+  <script>
+    // -------------------------------------------------------------------------
+    // Global Application State
+    // -------------------------------------------------------------------------
+    const state = {
+      currentUser: localStorage.getItem('flashseat_user') || 'Buyer_Alpha',
+      activeEventId: null,
+      events: [],
+      seats: [],
+      currentHold: null, // { seatId, seatNumber, tier, price, expireAt, timerInterval }
+      pollInterval: null,
+    };
+
+    // -------------------------------------------------------------------------
+    // Initialization
+    // -------------------------------------------------------------------------
+    window.addEventListener('DOMContentLoaded', async () => {
+      lucide.createIcons();
+      updateUserDisplay();
+      setupEventListeners();
+      
+      await checkHealth();
+      await loadEvents();
+
+      // Start seat matrix background polling every 2.5 seconds
+      state.pollInterval = setInterval(refreshSeatsSilently, 2500);
+    });
+
+    function setupEventListeners() {
+      // User dropdown toggle
+      const userBtn = document.getElementById('userMenuBtn');
+      const userDropdown = document.getElementById('userDropdown');
+      userBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        userDropdown.classList.toggle('hidden');
+      });
+      document.addEventListener('click', () => {
+        userDropdown.classList.add('hidden');
+      });
+    }
+
+    // -------------------------------------------------------------------------
+    // User Switcher
+    // -------------------------------------------------------------------------
+    function switchUser(userId) {
+      state.currentUser = userId;
+      localStorage.setItem('flashseat_user', userId);
+      updateUserDisplay();
+      showToast(`Switched active buyer session to: ${userId}`, 'info');
+      refreshSeatsSilently();
+    }
+
+    function randomizeUser() {
+      const randId = 'Buyer_' + Math.floor(1000 + Math.random() * 9000);
+      switchUser(randId);
+    }
+
+    function updateUserDisplay() {
+      document.getElementById('currentUserNameDisplay').textContent = state.currentUser;
+      const checkoutInput = document.getElementById('checkoutUserIdInput');
+      if (checkoutInput) checkoutInput.value = state.currentUser;
+    }
+
+    // -------------------------------------------------------------------------
+    // API Calls
+    // -------------------------------------------------------------------------
+    async function checkHealth() {
+      try {
+        const res = await fetch('/api/health');
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById('engineStatusText').textContent = 'Backend Online';
+          document.getElementById('redisStatusText').textContent = data.redis_status.includes('distributed')
+            ? 'Redis Distributed Locks'
+            : 'Redis In-Memory Mode';
+        }
+      } catch (err) {
+        document.getElementById('engineStatusText').textContent = 'Connecting...';
+      }
+    }
+
+    async function loadEvents() {
+      try {
+        const res = await fetch('/api/events');
+        if (!res.ok) throw new Error('Failed to load events');
+        state.events = await res.json();
+        
+        renderEventTabs();
+
+        // Select first event by default
+        if (state.events.length > 0 && !state.activeEventId) {
+          selectEvent(state.events[0].id);
+        }
+      } catch (err) {
+        showToast('Error loading events: ' + err.message, 'error');
+      }
+    }
+
+    function renderEventTabs() {
+      const container = document.getElementById('eventsContainer');
+      container.innerHTML = state.events.map(ev => {
+        const isSelected = ev.id === state.activeEventId;
+        return `
+          <div onclick="selectEvent(${ev.id})" 
+               class="cursor-pointer transition-all duration-200 rounded-2xl p-4 border ${
+                 isSelected 
+                   ? 'bg-slate-900 border-indigo-500 shadow-lg shadow-indigo-500/10 ring-1 ring-indigo-500/50' 
+                   : 'bg-slate-950/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900/40'
+               }">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1">
+                <i data-lucide="ticket" class="w-3 h-3"></i> Event #${ev.id}
+              </span>
+              <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                ev.available_seats > 0 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400'
+              }">
+                ${ev.available_seats} Available
+              </span>
+            </div>
+            <h3 class="text-sm font-bold text-white font-display line-clamp-1">${ev.name}</h3>
+            <p class="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1">
+              <i data-lucide="map-pin" class="w-3 h-3 text-slate-500"></i> ${ev.venue.split(',')[0]}
+            </p>
+          </div>
+        `;
+      }).join('');
+      lucide.createIcons();
+    }
+
+    async function selectEvent(eventId) {
+      state.activeEventId = eventId;
+      const ev = state.events.find(e => e.id === eventId);
+      if (ev) {
+        document.getElementById('activeEventTitle').textContent = ev.name;
+        document.getElementById('activeEventVenue').textContent = ev.venue;
+        document.getElementById('activeEventDesc').textContent = ev.description || '';
+        document.getElementById('statTotalSeats').textContent = ev.total_seats;
+        document.getElementById('statAvailSeats').textContent = ev.available_seats;
+        document.getElementById('statHeldSeats').textContent = ev.held_seats;
+        document.getElementById('statBookedSeats').textContent = ev.booked_seats;
+      }
+
+      renderEventTabs();
+      await loadSeats(eventId);
+    }
+
+    async function loadSeats(eventId) {
+      try {
+        const res = await fetch(`/api/events/${eventId}/seats`);
+        if (!res.ok) throw new Error('Failed to load seats');
+        state.seats = await res.json();
+        renderSeatMatrix();
+      } catch (err) {
+        showToast('Error loading seat map: ' + err.message, 'error');
+      }
+    }
+
+    async function refreshSeatsSilently() {
+      if (!state.activeEventId) return;
+      try {
+        const res = await fetch(`/api/events/${state.activeEventId}/seats`);
+        if (res.ok) {
+          state.seats = await res.json();
+          renderSeatMatrix();
+        }
+      } catch (err) {
+        // Silent background update error
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Seat Matrix Rendering
+    // -------------------------------------------------------------------------
+    function renderSeatMatrix() {
+      const container = document.getElementById('seatsContainer');
+      if (!state.seats || state.seats.length === 0) {
+        container.innerHTML = `<div class="text-center py-10 text-slate-500">No seats found for this event.</div>`;
+        return;
+      }
+
+      // Group seats by Row (A, B, C, D, E...)
+      const rows = {};
+      const tiers = {};
+      state.seats.forEach(seat => {
+        if (!rows[seat.row]) rows[seat.row] = [];
+        rows[seat.row].push(seat);
+        if (!tiers[seat.tier]) tiers[seat.tier] = { tier: seat.tier, price: seat.price };
+      });
+
+      // Render tier legend
+      const tierLegend = document.getElementById('tierLegendContainer');
+      tierLegend.innerHTML = Object.values(tiers).map(t => `
+        <span class="px-2.5 py-1 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] text-slate-300">
+          <strong class="text-indigo-400">${t.tier}</strong>: $${t.price.toFixed(0)}
+        </span>
+      `).join('');
+
+      // Render Rows
+      container.innerHTML = Object.keys(rows).sort().map(rowLetter => {
+        const rowSeats = rows[rowLetter];
+        return `
+          <div class="flex items-center gap-3">
+            <span class="w-6 text-center font-bold text-xs text-slate-500 font-display">${rowLetter}</span>
+            <div class="flex-1 flex flex-wrap gap-1.5 sm:gap-2 justify-center">
+              ${rowSeats.map(seat => renderSeatButton(seat)).join('')}
+            </div>
+            <span class="w-6 text-center font-bold text-xs text-slate-500 font-display">${rowLetter}</span>
+          </div>
+        `;
+      }).join('');
+      
+      lucide.createIcons();
+    }
+
+    function renderSeatButton(seat) {
+      const isSelectedByMe = state.currentHold && state.currentHold.seatId === seat.id;
+      const isHeldByMe = seat.status === 'HELD' && seat.held_by === state.currentUser;
+      const isHeldByOther = seat.status === 'HELD' && seat.held_by !== state.currentUser;
+      const isBooked = seat.status === 'BOOKED';
+
+      let bgClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30 hover:border-emerald-400';
+      let title = `${seat.seat_number} - ${seat.tier} - $${seat.price} (Available)`;
+      let icon = '';
+
+      if (isSelectedByMe || isHeldByMe) {
+        bgClass = 'bg-violet-600 text-white border-violet-400 ring-2 ring-violet-400/80 shadow-lg shadow-violet-500/40';
+        title = `${seat.seat_number} - Locked by you (${seat.ttl_remaining || 600}s left)`;
+        icon = `<i data-lucide="check" class="w-2.5 h-2.5 stroke-[3]"></i>`;
+      } else if (isHeldByOther) {
+        bgClass = 'bg-amber-500/20 text-amber-300 border-amber-500/50 animate-pulse cursor-not-allowed';
+        title = `${seat.seat_number} - Held by ${seat.held_by} (${seat.ttl_remaining || 0}s left)`;
+        icon = `<i data-lucide="clock" class="w-2.5 h-2.5 text-amber-400"></i>`;
+      } else if (isBooked) {
+        bgClass = 'bg-slate-900/60 text-slate-600 border-slate-800/80 cursor-not-allowed line-through';
+        title = `${seat.seat_number} - Already Booked`;
+        icon = `<i data-lucide="lock" class="w-2 h-2 text-rose-500/50"></i>`;
+      }
+
+      return `
+        <button onclick="handleSeatClick(${seat.id})"
+                title="${title}"
+                class="w-8 h-8 sm:w-9 sm:h-9 rounded-xl border text-[11px] font-bold font-display flex flex-col items-center justify-center transition-all transform active:scale-90 ${bgClass}">
+          <span>${seat.seat_number}</span>
+          ${icon ? `<span class="mt-[-2px]">${icon}</span>` : ''}
+        </button>
+      `;
+    }
+
+    // -------------------------------------------------------------------------
+    // Seat Click & Distributed Hold Logic
+    // -------------------------------------------------------------------------
+    async function handleSeatClick(seatId) {
+      const seat = state.seats.find(s => s.id === seatId);
+      if (!seat) return;
+
+      if (seat.status === 'BOOKED') {
+        showToast(`Seat ${seat.seat_number} is already booked!`, 'error');
+        return;
+      }
+
+      if (seat.status === 'HELD' && seat.held_by !== state.currentUser) {
+        showToast(`Conflict 409: Seat ${seat.seat_number} is locked by ${seat.held_by}! (${seat.ttl_remaining}s left)`, 'warning');
+        return;
+      }
+
+      // If already held by current user, just open the checkout drawer
+      if (state.currentHold && state.currentHold.seatId === seatId) {
+        return;
+      }
+
+      // Trigger seat hold API
+      await holdSeat(seat);
+    }
+
+    async function holdSeat(seat) {
+      try {
+        const payload = {
+          event_id: state.activeEventId,
+          seat_id: seat.id,
+          user_id: state.currentUser,
+        };
+
+        const res = await fetch('/api/seats/hold', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+
+        if (res.status === 409) {
+          showToast(`409 Conflict: ${data.detail}`, 'error');
+          refreshSeatsSilently();
+          return;
+        }
+
+        if (res.status === 429) {
+          showToast(`429 Rate Limit: ${data.detail}`, 'warning');
+          return;
+        }
+
+        if (!res.ok) {
+          showToast(data.detail || 'Failed to hold seat', 'error');
+          return;
+        }
+
+        // Successfully acquired lock!
+        showToast(`⚡ Lock Acquired! Seat ${seat.seat_number} held for 10 minutes.`, 'success');
+        
+        startHoldCountdown(seat, data.ttl_seconds || 600);
+        refreshSeatsSilently();
+
+      } catch (err) {
+        showToast('Error acquiring lock: ' + err.message, 'error');
+      }
+    }
+
+    function startHoldCountdown(seat, ttlSeconds) {
+      if (state.currentHold && state.currentHold.timerInterval) {
+        clearInterval(state.currentHold.timerInterval);
+      }
+
+      const expireAt = Date.now() + ttlSeconds * 1000;
+      
+      state.currentHold = {
+        seatId: seat.id,
+        seatNumber: seat.seat_number,
+        tier: seat.tier,
+        price: seat.price,
+        row: seat.row,
+        expireAt: expireAt,
+        totalTtl: ttlSeconds,
+        timerInterval: null,
+      };
+
+      // Switch drawer to State 2 (Active Hold)
+      document.getElementById('stateNoSelection').classList.add('hidden');
+      document.getElementById('stateConfirmedPass').classList.add('hidden');
+      document.getElementById('stateHeldCheckout').classList.remove('hidden');
+
+      document.getElementById('heldSeatNumber').textContent = seat.seat_number;
+      document.getElementById('heldSeatTier').textContent = seat.tier;
+      document.getElementById('heldSeatRow').textContent = `Row ${seat.row} • Tier Reserved`;
+      document.getElementById('heldSeatBasePrice').textContent = `$${seat.price.toFixed(2)}`;
+      document.getElementById('heldSeatTotalPrice').textContent = `$${seat.price.toFixed(2)}`;
+      document.getElementById('lockKeyBadge').textContent = `key: hold:${state.activeEventId}:${seat.id}`;
+      document.getElementById('checkoutUserIdInput').value = state.currentUser;
+
+      updateTimerDisplay();
+
+      state.currentHold.timerInterval = setInterval(() => {
+        const remaining = Math.max(0, Math.floor((state.currentHold.expireAt - Date.now()) / 1000));
+        updateTimerDisplay();
+
+        if (remaining <= 0) {
+          clearInterval(state.currentHold.timerInterval);
+          showToast(`Seat hold expired! The seat has returned to the public pool.`, 'warning');
+          clearCurrentSelection();
+          refreshSeatsSilently();
+        }
+      }, 1000);
+    }
+
+    function updateTimerDisplay() {
+      if (!state.currentHold) return;
+      const remaining = Math.max(0, Math.floor((state.currentHold.expireAt - Date.now()) / 1000));
+      const mins = Math.floor(remaining / 60);
+      const secs = remaining % 60;
+      const formatted = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      
+      const timerEl = document.getElementById('countdownTimer');
+      if (timerEl) timerEl.textContent = formatted;
+
+      const progressEl = document.getElementById('countdownProgress');
+      if (progressEl) {
+        const pct = Math.max(0, Math.min(100, (remaining / state.currentHold.totalTtl) * 100));
+        progressEl.style.width = pct + '%';
+        if (remaining < 60) {
+          progressEl.className = 'bg-rose-500 h-1.5 rounded-full transition-all duration-1000';
+          timerEl.className = 'text-3xl font-black font-display text-rose-500 tracking-wider my-0.5 animate-pulse';
+        } else {
+          progressEl.className = 'bg-amber-400 h-1.5 rounded-full transition-all duration-1000';
+          timerEl.className = 'text-3xl font-black font-display text-amber-400 tracking-wider my-0.5';
+        }
+      }
+    }
+
+    async function releaseSeatHold() {
+      if (!state.currentHold) return;
+      try {
+        const payload = {
+          event_id: state.activeEventId,
+          seat_id: state.currentHold.seatId,
+          user_id: state.currentUser,
+        };
+
+        const res = await fetch('/api/seats/release', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          showToast(`Seat hold released successfully.`, 'info');
+        }
+      } catch (err) {
+        // Continue cleanup
+      } finally {
+        clearCurrentSelection();
+        refreshSeatsSilently();
+      }
+    }
+
+    function clearCurrentSelection() {
+      if (state.currentHold && state.currentHold.timerInterval) {
+        clearInterval(state.currentHold.timerInterval);
+      }
+      state.currentHold = null;
+
+      document.getElementById('stateHeldCheckout').classList.add('hidden');
+      document.getElementById('stateConfirmedPass').classList.add('hidden');
+      document.getElementById('stateNoSelection').classList.remove('hidden');
+      renderSeatMatrix();
+    }
+
+    // -------------------------------------------------------------------------
+    // Confirm Booking / Ticket Checkout
+    // -------------------------------------------------------------------------
+    async function confirmSeatBooking() {
+      if (!state.currentHold) return;
+      const btn = document.getElementById('confirmBookingBtn');
+      btn.disabled = true;
+      btn.innerHTML = `<i data-lucide="loader" class="w-4 h-4 animate-spin"></i> Processing ACID Booking...`;
+      lucide.createIcons();
+
+      try {
+        const payload = {
+          event_id: state.activeEventId,
+          seat_id: state.currentHold.seatId,
+          user_id: state.currentUser,
+          payment_token: 'tok_flash_success',
+        };
+
+        const res = await fetch('/api/seats/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          showToast(data.detail || 'Confirmation failed', 'error');
+          return;
+        }
+
+        // Success! Confetti explosion
+        confetti({
+          particleCount: 120,
+          spread: 70,
+          origin: { y: 0.6 }
+        });
+
+        showToast(`🎉 Ticket Confirmed! Ref: ${data.booking_reference}`, 'success');
+
+        // Switch to State 3: Confirmed Ticket Pass
+        if (state.currentHold.timerInterval) clearInterval(state.currentHold.timerInterval);
+        
+        document.getElementById('stateHeldCheckout').classList.add('hidden');
+        document.getElementById('stateConfirmedPass').classList.remove('hidden');
+
+        document.getElementById('ticketEventName').textContent = data.event_name;
+        document.getElementById('ticketVenue').textContent = document.getElementById('activeEventVenue').textContent;
+        document.getElementById('ticketSeatNumber').textContent = data.seat_number;
+        document.getElementById('ticketRow').textContent = state.currentHold.row;
+        document.getElementById('ticketPrice').textContent = `$${data.amount_paid.toFixed(0)}`;
+        document.getElementById('ticketBookingRef').textContent = data.booking_reference;
+
+        state.currentHold = null;
+        await loadEvents();
+        await refreshSeatsSilently();
+
+      } catch (err) {
+        showToast('Error during booking: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4"></i> Confirm Purchase & Issue Ticket`;
+        lucide.createIcons();
+      }
+    }
+
+    function copyBookingRef() {
+      const ref = document.getElementById('ticketBookingRef').textContent;
+      navigator.clipboard.writeText(ref);
+      showToast(`Copied ${ref} to clipboard!`, 'info');
+    }
+
+    // -------------------------------------------------------------------------
+    // Reset Demo Seats
+    // -------------------------------------------------------------------------
+    async function resetDemoSeats() {
+      const btn = document.getElementById('resetBtn');
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/admin/reset-demo', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          showToast(`Demo reset: ${data.available_seats_count} seats are now AVAILABLE.`, 'success');
+          clearCurrentSelection();
+          await loadEvents();
+          await refreshSeatsSilently();
+        }
+      } catch (err) {
+        showToast('Failed to reset: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Concurrency Stress Simulator
+    // -------------------------------------------------------------------------
+    function openRaceSimulator() {
+      // Pick first available seat ID
+      const avail = state.seats.find(s => s.status === 'AVAILABLE');
+      if (avail) {
+        document.getElementById('raceSeatIdInput').value = avail.id;
+      }
+      document.getElementById('raceModal').classList.remove('hidden');
+      document.getElementById('raceResultsArea').classList.add('hidden');
+    }
+
+    function closeRaceSimulator() {
+      document.getElementById('raceModal').classList.add('hidden');
+    }
+
+    async function executeRaceConditionTest() {
+      const seatId = parseInt(document.getElementById('raceSeatIdInput').value);
+      const botCount = parseInt(document.getElementById('raceBotCountSelect').value);
+      const logsContainer = document.getElementById('raceLogsContainer');
+      const resultsArea = document.getElementById('raceResultsArea');
+      const winnerBadge = document.getElementById('raceWinnerBadge');
+
+      resultsArea.classList.remove('hidden');
+      logsContainer.innerHTML = `<div class="text-indigo-400">⚡ Dispatching ${botCount} simultaneous hold requests...</div>`;
+      
+      const btn = document.getElementById('executeRaceBtn');
+      btn.disabled = true;
+
+      // Construct simultaneous requests
+      const promises = [];
+      const startTime = performance.now();
+
+      for (let i = 1; i <= botCount; i++) {
+        const botUserId = `Bot_Rush_${i}`;
+        const p = fetch('/api/seats/hold', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            event_id: state.activeEventId,
+            seat_id: seatId,
+            user_id: botUserId,
+          })
+        }).then(async res => {
+          const body = await res.json();
+          return { botUserId, status: res.status, body };
+        }).catch(err => ({ botUserId, status: 500, body: { detail: err.message } }));
+
+        promises.push(p);
+      }
+
+      const results = await Promise.all(promises);
+      const duration = (performance.now() - startTime).toFixed(1);
+
+      let winner = null;
+      let logsHtml = '';
+
+      results.forEach(r => {
+        if (r.status === 200) {
+          winner = r.botUserId;
+          logsHtml += `<div class="text-emerald-400 font-bold">✓ [200 OK] ${r.botUserId} WON distributed lock! (10m TTL)</div>`;
+        } else if (r.status === 409) {
+          logsHtml += `<div class="text-rose-400">✕ [409 Conflict] ${r.botUserId} rejected (Seat held by winner)</div>`;
+        } else if (r.status === 429) {
+          logsHtml += `<div class="text-amber-400">⚠ [429 Rate Limited] ${r.botUserId} throttled</div>`;
+        } else {
+          logsHtml += `<div class="text-slate-500">[${r.status}] ${r.botUserId}: ${r.body.detail}</div>`;
+        }
+      });
+
+      logsContainer.innerHTML = logsHtml;
+      winnerBadge.textContent = winner ? `Winner: ${winner} (${duration}ms)` : 'Already Held';
+      btn.disabled = false;
+
+      refreshSeatsSilently();
+    }
+
+    // -------------------------------------------------------------------------
+    // Verify Booking Modal
+    // -------------------------------------------------------------------------
+    function openVerifyModal() {
+      document.getElementById('verifyModal').classList.remove('hidden');
+      document.getElementById('verifyResultContainer').classList.add('hidden');
+    }
+
+    function closeVerifyModal() {
+      document.getElementById('verifyModal').classList.add('hidden');
+    }
+
+    async function queryBookingReference() {
+      const ref = document.getElementById('verifyRefInput').value.trim();
+      if (!ref) {
+        showToast('Please enter a booking reference', 'warning');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/bookings/${ref}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          showToast(data.detail || 'Booking not found', 'error');
+          document.getElementById('verifyResultContainer').classList.add('hidden');
+          return;
+        }
+
+        const container = document.getElementById('verifyResultContainer');
+        container.classList.remove('hidden');
+        document.getElementById('verifiedEventName').textContent = data.event_name;
+        document.getElementById('verifiedVenue').textContent = data.venue;
+        document.getElementById('verifiedSeat').textContent = data.seat_number;
+        document.getElementById('verifiedTier').textContent = data.tier;
+        document.getElementById('verifiedAmount').textContent = `$${data.amount_paid}`;
+        document.getElementById('verifiedUser').textContent = data.user_id;
+        document.getElementById('verifiedStatusBadge').textContent = data.status;
+
+      } catch (err) {
+        showToast('Query error: ' + err.message, 'error');
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Toast Notification System
+    // -------------------------------------------------------------------------
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      
+      let borderBg = 'bg-slate-900 border-indigo-500 text-indigo-200';
+      let icon = 'info';
+
+      if (type === 'success') {
+        borderBg = 'bg-slate-900 border-emerald-500 text-emerald-200';
+        icon = 'check-circle';
+      } else if (type === 'warning') {
+        borderBg = 'bg-slate-900 border-amber-500 text-amber-200';
+        icon = 'alert-triangle';
+      } else if (type === 'error') {
+        borderBg = 'bg-slate-900 border-rose-500 text-rose-200';
+        icon = 'alert-octagon';
+      }
+
+      toast.className = `flex items-center gap-2.5 px-4 py-3 rounded-2xl border shadow-2xl text-xs font-medium pointer-events-auto transition-all transform translate-y-4 opacity-0 ${borderBg}`;
+      toast.innerHTML = `
+        <i data-lucide="${icon}" class="w-4 h-4 shrink-0"></i>
+        <span>${message}</span>
+      `;
+
+      container.appendChild(toast);
+      lucide.createIcons();
+
+      // Trigger enter animation
+      requestAnimationFrame(() => {
+        toast.classList.remove('translate-y-4', 'opacity-0');
+      });
+
+      // Auto dismiss after 4.5s
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-y-2');
+        setTimeout(() => toast.remove(), 300);
+      }, 4500);
+    }
+  </script>
+</body>
+</html>

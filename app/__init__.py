@@ -1,0 +1,3 @@
+"""
+FlashSeat Application Package
+"""

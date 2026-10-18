@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: flashseat
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && python -m app.seed
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:///./flashseat.db
+      - key: SEAT_HOLD_TTL_SECONDS
+        value: "600"
+      # To use an external/managed Redis instance on Render, add:
+      # - key: REDIS_URL
+      #   fromService:
+      #     type: redis
+      #     name: flashseat-redis
+      #     property: connectionString
